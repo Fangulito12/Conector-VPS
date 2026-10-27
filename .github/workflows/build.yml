@@ -1,0 +1,67 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [fijo, libre]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Descomprimir proyecto
+        run: unzip -q proyecto.zip -d proyecto
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Descargar hev-socks5-tunnel
+        run: git clone --recursive --depth 1 --shallow-submodules https://github.com/heiher/hev-socks5-tunnel proyecto/app/src/main/jni/hev-socks5-tunnel
+
+      - name: Mostrar funciones nativas de hev (para diagnóstico)
+        run: |
+          f=$(grep -rl RegisterNatives proyecto/app/src/main/jni/hev-socks5-tunnel/src | head -1)
+          echo "Archivo JNI: $f"
+          grep -n 'TProxy' "$f" || true
+          grep -q '(Ljava/lang/String;I)Z' "$f" || echo "::warning::La firma de TProxyStartService en hev no es la esperada (Z). Avísame."
+
+      - name: Instalar NDK y SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # La variante "fijo" lleva la IP de tu VPS (secretos de GitHub) y sale lista para conectar.
+      # La variante "libre" no lleva ningún dato: el que la instale debe escribir el servidor o
+      # importar un perfil .conecta. Las dos salen de esta misma compilación, con la misma firma
+      # (mismo HWID en ambas), pero con nombres de paquete distintos para poder tener las dos
+      # instaladas a la vez si hace falta.
+      - name: Compilar (${{ matrix.variant }})
+        working-directory: proyecto
+        env:
+          SERVER_HOST: ${{ matrix.variant == 'fijo' && secrets.SERVER_HOST || '' }}
+          SERVER_PORT: ${{ matrix.variant == 'fijo' && secrets.SERVER_PORT || '' }}
+          UDPGW_PORT: ${{ matrix.variant == 'fijo' && secrets.UDPGW_PORT || '' }}
+          APP_SUFFIX: ${{ matrix.variant == 'libre' && '.libre' || '' }}
+        run: gradle assembleDebug --no-daemon
+
+      - name: Verificar que el APK trae el túnel nativo
+        run: |
+          unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep libhev-socks5-tunnel.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Conecta-HWID-${{ matrix.variant }}-APK
+          path: proyecto/app/build/outputs/apk/debug/app-debug.apk
