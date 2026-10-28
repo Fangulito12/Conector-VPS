@@ -43,6 +43,21 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      # Motor V2Ray (solo en la variante libre). Si la descarga falla, la app compila igual
+      # pero sale sin V2Ray y el boton avisa que no esta incluido.
+      - name: Descargar motor V2Ray (solo libre)
+        if: matrix.variant == 'libre'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p proyecto/app/libs
+          if gh release download v26.7.31 --repo 2dust/AndroidLibXrayLite --pattern '*.aar' --dir proyecto/app/libs; then
+            n=$(ls proyecto/app/libs/*.aar | wc -l)
+            if [ "$n" -ne 1 ]; then rm -f proyecto/app/libs/*.aar; echo "::warning::Se esperaba un solo .aar; la app libre saldra sin V2Ray"; fi
+          else
+            echo "::warning::No se pudo descargar el motor V2Ray; la app libre saldra sin V2Ray"
+          fi
+
       # La variante "fijo" lleva la IP de tu VPS (secretos de GitHub) y sale lista para conectar.
       # La variante "libre" no lleva ningún dato: el que la instale debe escribir el servidor o
       # importar un perfil .conecta. Las dos salen de esta misma compilación, con la misma firma
@@ -60,6 +75,11 @@ jobs:
       - name: Verificar que el APK trae el túnel nativo
         run: |
           unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep libhev-socks5-tunnel.so
+
+      - name: Avisar si la app libre salió sin el motor V2Ray
+        if: matrix.variant == 'libre'
+        run: |
+          unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep -q libgojni.so || echo "::warning::La app libre salio SIN el motor V2Ray (revisa el paso de descarga)"
 
       - uses: actions/upload-artifact@v4
         with:
