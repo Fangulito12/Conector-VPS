@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Firmar el APK en GitHub con tu firma .pk8 + .pem (sin contrasena).
+# No hace falta convertir nada ni tocar build.gradle: se usa apksigner, que ya viene
+# en los servidores de GitHub.
+# ---------------------------------------------------------------------------
+
+# PASO A: convierte tus dos archivos a texto (una sola vez, en tu equipo o Termux):
+#     base64 -w0 tu-clave.pk8 > pk8.txt
+#     base64 -w0 tu-certificado.pem > pem.txt
+#   (El .pem debe ser el CERTIFICADO: su primera linea dice "BEGIN CERTIFICATE".)
+#   Luego en GitHub: Settings > Secrets and variables > Actions > New repository secret
+#   Crea estos 2 secretos:
+#     KEY_PK8_B64   -> todo el contenido de pk8.txt
+#     CERT_PEM_B64  -> todo el contenido de pem.txt
+
+# PASO B: en tu flujo, DESPUES de compilar los APK y ANTES de publicar el Release, agrega:
+      - name: Firmar APK con mi firma
+        env:
+          KEY_PK8_B64: ${{ secrets.KEY_PK8_B64 }}
+          CERT_PEM_B64: ${{ secrets.CERT_PEM_B64 }}
+        run: |
+          echo "$KEY_PK8_B64" | base64 -d > "$RUNNER_TEMP/key.pk8"
+          echo "$CERT_PEM_B64" | base64 -d > "$RUNNER_TEMP/cert.pem"
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          APKSIGNER=$(ls -d "$SDK"/build-tools/*/apksigner | sort -V | tail -1)
+          # Ajusta esta lista a las rutas reales de tus APK:
+          for f in Conecta-HWID.apk Conecta-Generador.apk; do
+            "$APKSIGNER" sign --key "$RUNNER_TEMP/key.pk8" --cert "$RUNNER_TEMP/cert.pem" --out "$f.signed" "$f"
+            mv "$f.signed" "$f"
+            "$APKSIGNER" verify --print-certs "$f"   # muestra la huella de tu firma en el registro
+          done
+
+# Con esto, el APK que va al Release ya esta firmado con TU firma. Si la huella (SHA-256)
+# que imprime el registro es la de las apps que ya tienen tus usuarios, la actualizacion
+# se instala encima sin problemas.
+
+# ---------------------------------------------------------------------------
+# ALTERNATIVA (solo si prefieres firmar desde Gradle): convertir a .p12 con contrasena
+#     openssl pkcs8 -inform DER -nocrypt -in tu-clave.pk8 -out clave.pem
+#     openssl pkcs12 -export -in tu-certificado.pem -inkey clave.pem -name miclave -out mi-firma.p12
+#   (te pedira una contrasena: Java no acepta .p12 sin contrasena). Despues se usa como en
+#   la version anterior de este archivo (secretos KEYSTORE_*). El PASO B de arriba es mas simple.
+# ---------------------------------------------------------------------------
