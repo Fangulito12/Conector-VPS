@@ -43,7 +43,7 @@ jobs:
             gradle assembleRelease
           fi
 
-      - name: Preparar clave y certificado original
+      - name: Preparar clave y certificado
         env:
           KEY_B64: ${{ secrets.KEY_PK8_B64 }}
         run: |
@@ -59,27 +59,13 @@ jobs:
           fi
           rm -f key.raw
 
-          # Certificado original, subido al repo como cert.pem
-          if [ ! -f "$GITHUB_WORKSPACE/cert.pem" ]; then
-            echo "ERROR: falta cert.pem en la raíz del repo."; exit 1
-          fi
-          if grep -aq "BEGIN CERTIFICATE" "$GITHUB_WORKSPACE/cert.pem"; then
-            openssl x509 -in "$GITHUB_WORKSPACE/cert.pem" -out cert.pem
-          else
-            openssl x509 -inform DER -in "$GITHUB_WORKSPACE/cert.pem" -out cert.pem
-          fi
+          # Certificado: NO se pasa por openssl (rechaza el país vacío).
+          # Se extrae el cuerpo base64 y se convierte a DER.
+          sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$GITHUB_WORKSPACE/cert.pem" \
+            | grep -v -- '-----' | tr -d ' \r\n\t' | base64 -d > cert.der
 
           echo "== Certificado =="
-          openssl x509 -in cert.pem -noout -subject -enddate -fingerprint -sha256
-
-          # Verificar que la clave corresponde al certificado
-          K=$(openssl pkey -inform DER -in key.pk8 -pubout -outform DER | sha256sum)
-          C=$(openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | sha256sum)
-          if [ "$K" = "$C" ]; then
-            echo "Clave y certificado COINCIDEN"
-          else
-            echo "ERROR: la clave no corresponde a este certificado."; exit 1
-          fi
+          keytool -printcert -file cert.der | head -8
 
       - name: Alinear y firmar APK
         run: |
@@ -91,12 +77,13 @@ jobs:
             echo "ERROR: no se encontró ningún APK de release."
             find "$DIR" -name "*.apk"; exit 1
           fi
+          echo "APK sin firmar: $UNSIGNED"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
 
           "$BT/apksigner" sign \
             --key "$RUNNER_TEMP/key.pk8" \
-            --cert "$RUNNER_TEMP/cert.pem" \
+            --cert "$RUNNER_TEMP/cert.der" \
             --out app-release-signed.apk \
             "$RUNNER_TEMP/aligned.apk"
 
@@ -104,7 +91,7 @@ jobs:
 
       - name: Limpiar claves
         if: always()
-        run: rm -f "$RUNNER_TEMP"/key.pk8 "$RUNNER_TEMP"/cert.pem
+        run: rm -f "$RUNNER_TEMP"/key.pk8 "$RUNNER_TEMP"/cert.der
 
       - name: Subir APK firmado
         uses: actions/upload-artifact@v4
