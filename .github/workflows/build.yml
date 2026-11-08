@@ -100,12 +100,45 @@ jobs:
           KEY_PK8_B64: ${{ secrets.KEY_PK8_B64 }}
           CERT_PEM_B64: ${{ secrets.CERT_PEM_B64 }}
         run: |
+          set -eo pipefail
           if [ -z "$KEY_PK8_B64" ] || [ -z "$CERT_PEM_B64" ]; then
             echo "::error::Faltan los secretos KEY_PK8_B64 y/o CERT_PEM_B64 (Settings > Secrets and variables > Actions)."
             exit 1
           fi
-          echo "$KEY_PK8_B64" | base64 -d > "$RUNNER_TEMP/key.pk8"
-          echo "$CERT_PEM_B64" | base64 -d > "$RUNNER_TEMP/cert.pem"
+          printf '%s' "$KEY_PK8_B64"  | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/key.raw"
+          printf '%s' "$CERT_PEM_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/cert.raw"
+          echo "Clave: $(wc -c < "$RUNNER_TEMP/key.raw") bytes | Certificado: $(wc -c < "$RUNNER_TEMP/cert.raw") bytes"
+
+          # Clave -> PKCS#8 DER, que es lo que pide apksigner. Acepta PEM o DER, PKCS#8 o RSA clásico.
+          KEY_OK=0
+          for inform in PEM DER; do
+            for opt in "" "-topk8"; do
+              if openssl pkcs8 $opt -nocrypt -inform $inform -in "$RUNNER_TEMP/key.raw" -outform DER -out "$RUNNER_TEMP/key.pk8" 2>/dev/null; then
+                KEY_OK=1; break 2
+              fi
+            done
+          done
+          if [ "$KEY_OK" != 1 ]; then
+            echo "::error::No se pudo leer la clave privada del secreto KEY_PK8_B64. Puede estar dañada o protegida con contraseña. Vuelve a crear el secreto con: base64 -w0 tu-clave.pk8 (primeros bytes recibidos: $(head -c 4 "$RUNNER_TEMP/key.raw" | od -An -tx1))"
+            exit 1
+          fi
+
+          # Certificado -> PEM (acepta PEM o DER)
+          if ! openssl x509 -inform PEM -in "$RUNNER_TEMP/cert.raw" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
+            if ! openssl x509 -inform DER -in "$RUNNER_TEMP/cert.raw" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
+              echo "::error::El secreto CERT_PEM_B64 no es un certificado (el .pem debe decir BEGIN CERTIFICATE, no PRIVATE KEY)."
+              exit 1
+            fi
+          fi
+
+          # La clave y el certificado deben ser pareja
+          A=$(openssl pkey -inform DER -in "$RUNNER_TEMP/key.pk8" -pubout | sha256sum)
+          B=$(openssl x509 -in "$RUNNER_TEMP/cert.pem" -pubkey -noout | sha256sum)
+          if [ "$A" != "$B" ]; then
+            echo "::error::La clave (.pk8) y el certificado (.pem) no son pareja: no salieron del mismo juego de firma."
+            exit 1
+          fi
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -subject -fingerprint -sha256
           if [ "${{ matrix.variant }}" = "libre" ]; then NOMBRE=Generador; else NOMBRE=HWID; fi
           DIR=proyecto/app/build/outputs/apk/debug
           OUT="$DIR/Conecta_${NOMBRE}_${VERSION_PREFIX//./_}_${{ github.run_number }}.apk"
