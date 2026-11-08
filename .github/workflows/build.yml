@@ -2,9 +2,19 @@ name: Build APK
 on:
   push:
   workflow_dispatch:
+    inputs:
+      notas:
+        description: "Novedades de esta versión (se muestran en el aviso de actualización de la app)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
+
+env:
+  # Debe coincidir con el principio de versionName en app/build.gradle.
+  # Repositorio de clientes: "1.24"  |  Repositorio tuyo (calibración nueva): "1.25"
+  VERSION_PREFIX: "1.24"
 
 jobs:
   build:
@@ -81,7 +91,60 @@ jobs:
         run: |
           unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep -q libgojni.so || echo "::warning::La app libre salio SIN el motor V2Ray (revisa el paso de descarga)"
 
+      # Firma el APK con TU firma (.pk8 + .pem guardados como secretos) y le pone el nombre que
+      # busca el actualizador de la app: "HWID" para la variante fija y "Generador" para la libre.
+      # Si faltan los secretos, el flujo se detiene a propósito: un APK con otra firma no se
+      # podría instalar encima de la app que ya tienen tus usuarios.
+      - name: Firmar APK con mi firma
+        env:
+          KEY_PK8_B64: ${{ secrets.KEY_PK8_B64 }}
+          CERT_PEM_B64: ${{ secrets.CERT_PEM_B64 }}
+        run: |
+          if [ -z "$KEY_PK8_B64" ] || [ -z "$CERT_PEM_B64" ]; then
+            echo "::error::Faltan los secretos KEY_PK8_B64 y/o CERT_PEM_B64 (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          echo "$KEY_PK8_B64" | base64 -d > "$RUNNER_TEMP/key.pk8"
+          echo "$CERT_PEM_B64" | base64 -d > "$RUNNER_TEMP/cert.pem"
+          if [ "${{ matrix.variant }}" = "libre" ]; then NOMBRE=Generador; else NOMBRE=HWID; fi
+          DIR=proyecto/app/build/outputs/apk/debug
+          OUT="$DIR/Conecta_${NOMBRE}_${VERSION_PREFIX//./_}_${{ github.run_number }}.apk"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
+            --key "$RUNNER_TEMP/key.pk8" --cert "$RUNNER_TEMP/cert.pem" \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --out "$OUT" "$DIR/app-debug.apk"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$OUT"   # debe verse tu huella SHA-256
+          echo "APK_FIRMADO=$OUT" >> "$GITHUB_ENV"
+
       - uses: actions/upload-artifact@v4
         with:
           name: Conecta-HWID-${{ matrix.variant }}-APK
-          path: proyecto/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APK_FIRMADO }}
+
+  # Publica el Release que usa el actualizador de la app. Solo corre cuando lo pides tú:
+  # pestaña Actions > Build APK > "Run workflow" (ahí puedes escribir las novedades).
+  # Con un simple "push" solo se compila, y los usuarios no reciben nada.
+  # Si algún día quieres publicar en cada push, borra la línea "if:" de este job.
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: apks
+          merge-multiple: true
+
+      - name: Ver archivos a publicar
+        run: ls -la apks
+
+      - name: Publicar Release (actualizador de la app)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_PREFIX }}.${{ github.run_number }}
+          name: Conecta v${{ env.VERSION_PREFIX }}.${{ github.run_number }}
+          body: ${{ inputs.notas }}
+          files: apks/*.apk
+          make_latest: true
