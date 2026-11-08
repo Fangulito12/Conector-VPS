@@ -37,11 +37,21 @@ jobs:
       - name: Copiar librerías nativas del APK que funciona
         run: |
           set -eo pipefail
-          BASE=$(ls *.apk 2>/dev/null | head -1 || true)
+          echo "== Archivos en la raíz del repo =="
+          ls -la
+
+          BASE=$(find . -type f -iname "*.apk" \
+                   -not -path "./src_proyecto/*" -not -path "./.git/*" \
+                   -not -name "app-release-signed.apk" | head -1)
           if [ -z "$BASE" ]; then
-            echo "ERROR: falta el APK que funciona (Conecta_HWID_1_24_67.apk) en la raíz del repo."; exit 1
+            echo "ERROR: no hay ningún .apk en el repo."
+            echo "Subí Conecta_HWID_1_24_67.apk desde GitHub (Add file > Upload files) y volvé a ejecutar."
+            echo "== Todos los archivos del repo (sin .git) =="
+            find . -type f -not -path "./.git/*" -not -path "./src_proyecto/*" | head -50
+            exit 1
           fi
           echo "APK base: $BASE"
+          ls -l "$BASE"
 
           MANIFEST=$(find src_proyecto -path "*src/main/AndroidManifest.xml" -not -path "*/build/*" | head -1)
           if [ -z "$MANIFEST" ]; then
@@ -51,7 +61,8 @@ jobs:
           echo "Módulo principal: $MAIN"
 
           mkdir -p "$RUNNER_TEMP/basex"
-          unzip -q "$BASE" 'lib/*' -d "$RUNNER_TEMP/basex"
+          unzip -q "$BASE" 'lib/*' -d "$RUNNER_TEMP/basex" || {
+            echo "ERROR: ese APK no contiene carpeta lib/ (no es el que funciona o está dañado)."; exit 1; }
           mkdir -p "$MAIN/jniLibs"
           cp -r "$RUNNER_TEMP/basex/lib/." "$MAIN/jniLibs/"
 
@@ -91,10 +102,11 @@ jobs:
         run: |
           set -eo pipefail
           DIR=$(cat "$RUNNER_TEMP/projdir.txt")
-          NEW=$(realpath "$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)")
+          NEW=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
           if [ -z "$NEW" ]; then
             echo "ERROR: no se encontró ningún APK de release."; find "$DIR" -name "*.apk"; exit 1
           fi
+          NEW=$(realpath "$NEW")
           echo "$NEW" > "$RUNNER_TEMP/newapk.txt"
           echo "APK nuevo: $NEW"
           echo "== .so en el APK nuevo =="
