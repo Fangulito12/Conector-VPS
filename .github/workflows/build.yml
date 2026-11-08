@@ -16,8 +16,24 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Descomprimir proyecto
+        run: |
+          set -eo pipefail
+          ls -la
+          unzip -q proyecto.zip -d src_proyecto
+          echo "== Archivos gradlew encontrados =="
+          find src_proyecto -name gradlew
+
       - name: Compilar APK sin firmar
         run: |
+          set -eo pipefail
+          GRADLEW=$(find src_proyecto -name gradlew | head -1)
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: no hay gradlew dentro del zip. Mira la lista de archivos del paso anterior."; exit 1
+          fi
+          DIR=$(dirname "$GRADLEW")
+          echo "$DIR" > "$RUNNER_TEMP/projdir.txt"
+          cd "$DIR"
           chmod +x ./gradlew
           ./gradlew assembleRelease
 
@@ -29,17 +45,14 @@ jobs:
           set -eo pipefail
           cd "$RUNNER_TEMP"
 
-          # Decodificar (tr elimina saltos de línea, espacios y CR por si acaso)
           echo "$KEY_B64"  | tr -d ' \r\n' | base64 -d > key.raw
           echo "$CERT_B64" | tr -d ' \r\n' | base64 -d > cert.raw
 
           echo "== Tipo de archivos =="
           file key.raw cert.raw
-          echo "== Cabeceras PEM (si las hay) =="
           echo "-- key.raw:";  grep -a "BEGIN\|END" key.raw  || echo "(binario/DER)"
           echo "-- cert.raw:"; grep -a "BEGIN\|END" cert.raw || echo "(binario/DER)"
 
-          # Detectar secretos intercambiados
           if grep -aq "BEGIN CERTIFICATE" key.raw && ! grep -aq "PRIVATE KEY" key.raw; then
             echo "ERROR: el secreto de la CLAVE contiene un certificado. Los secretos están intercambiados."; exit 1
           fi
@@ -47,27 +60,21 @@ jobs:
             echo "ERROR: el secreto del CERTIFICADO contiene una clave privada (¿intercambiados o archivo combinado?)."; exit 1
           fi
 
-          # Clave -> PKCS#8 DER sin cifrar (acepta PEM o DER de entrada)
           if grep -aq "BEGIN" key.raw; then
             openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in key.raw -out key.pk8
           else
             openssl pkcs8 -topk8 -nocrypt -inform DER -outform DER -in key.raw -out key.pk8
           fi
 
-          # Certificado -> PEM limpio (acepta PEM o DER de entrada)
           if grep -aq "BEGIN CERTIFICATE" cert.raw; then
             openssl x509 -in cert.raw -out cert.pem
           else
             openssl x509 -inform DER -in cert.raw -out cert.pem
           fi
 
-          echo "== Info del certificado =="
           openssl x509 -in cert.pem -noout -subject -enddate
-
-          echo "== Info de la clave =="
           openssl pkey -inform DER -in key.pk8 -text -noout | head -1
 
-          # Comprobar que clave y certificado coinciden
           K=$(openssl pkey -inform DER -in key.pk8 -pubout -outform DER | sha256sum)
           C=$(openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | sha256sum)
           [ "$K" = "$C" ] && echo "Clave y certificado COINCIDEN" || { echo "ERROR: no coinciden"; exit 1; }
@@ -78,7 +85,8 @@ jobs:
         run: |
           set -eo pipefail
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          UNSIGNED=$(find app/build/outputs/apk/release -name "*-unsigned.apk" | head -1)
+          DIR=$(cat "$RUNNER_TEMP/projdir.txt")
+          UNSIGNED=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
           echo "APK sin firmar: $UNSIGNED"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
