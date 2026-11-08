@@ -62,4 +62,41 @@ jobs:
           fi
 
           echo "== Info del certificado =="
-          openssl x509 -in cert.pem
+          openssl x509 -in cert.pem -noout -subject -enddate
+
+          echo "== Info de la clave =="
+          openssl pkey -inform DER -in key.pk8 -text -noout | head -1
+
+          # Comprobar que clave y certificado coinciden
+          K=$(openssl pkey -inform DER -in key.pk8 -pubout -outform DER | sha256sum)
+          C=$(openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | sha256sum)
+          [ "$K" = "$C" ] && echo "Clave y certificado COINCIDEN" || { echo "ERROR: no coinciden"; exit 1; }
+
+          rm -f key.raw cert.raw
+
+      - name: Alinear y firmar APK
+        run: |
+          set -eo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(find app/build/outputs/apk/release -name "*-unsigned.apk" | head -1)
+          echo "APK sin firmar: $UNSIGNED"
+
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+
+          "$BT/apksigner" sign \
+            --key "$RUNNER_TEMP/key.pk8" \
+            --cert "$RUNNER_TEMP/cert.pem" \
+            --out app-release-signed.apk \
+            "$RUNNER_TEMP/aligned.apk"
+
+          "$BT/apksigner" verify --verbose app-release-signed.apk
+
+      - name: Limpiar claves
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/key.pk8 "$RUNNER_TEMP"/cert.pem
+
+      - name: Subir APK firmado
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-firmado
+          path: app-release-signed.apk
