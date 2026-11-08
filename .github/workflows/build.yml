@@ -24,21 +24,14 @@ jobs:
         run: |
           set -eo pipefail
           unzip -q proyecto.zip -d src_proyecto
-          echo "== Primeros niveles del zip =="
           find src_proyecto -maxdepth 3 | head -60
-          echo "== Archivos clave =="
-          find src_proyecto \( -name gradlew -o -name settings.gradle -o -name settings.gradle.kts \
-            -o -name build.gradle -o -name build.gradle.kts -o -name pubspec.yaml \
-            -o -name config.xml -o -name package.json -o -name "*.apk" -o -name "*.aia" \) \
-            -not -path "*/node_modules/*" | head -40
 
       - name: Compilar APK sin firmar
         run: |
           set -eo pipefail
           SETTINGS=$(find src_proyecto \( -name settings.gradle -o -name settings.gradle.kts \) | head -1)
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: no hay settings.gradle en el zip, así que no es un proyecto Gradle/Android nativo."
-            echo "Revisá la lista de archivos del paso anterior."; exit 1
+            echo "ERROR: no hay settings.gradle en el zip."; exit 1
           fi
           DIR=$(dirname "$SETTINGS")
           echo "$DIR" > "$RUNNER_TEMP/projdir.txt"
@@ -50,33 +43,43 @@ jobs:
             gradle assembleRelease
           fi
 
-      - name: Preparar clave y generar certificado
+      - name: Preparar clave y certificado original
         env:
           KEY_B64: ${{ secrets.KEY_PK8_B64 }}
         run: |
           set -eo pipefail
           cd "$RUNNER_TEMP"
 
+          # Clave -> PKCS#8 DER sin cifrar
           echo "$KEY_B64" | tr -d ' \r\n' | base64 -d > key.raw
-
-          # Clave -> PKCS#8 DER sin cifrar (para apksigner)
           if grep -aq "BEGIN" key.raw; then
             openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in key.raw -out key.pk8
           else
             openssl pkcs8 -topk8 -nocrypt -inform DER -outform DER -in key.raw -out key.pk8
           fi
+          rm -f key.raw
 
-          # Clave en PEM, solo para crear el certificado
-          openssl pkey -inform DER -in key.pk8 -out key.pem
+          # Certificado original, subido al repo como cert.pem
+          if [ ! -f "$GITHUB_WORKSPACE/cert.pem" ]; then
+            echo "ERROR: falta cert.pem en la raíz del repo."; exit 1
+          fi
+          if grep -aq "BEGIN CERTIFICATE" "$GITHUB_WORKSPACE/cert.pem"; then
+            openssl x509 -in "$GITHUB_WORKSPACE/cert.pem" -out cert.pem
+          else
+            openssl x509 -inform DER -in "$GITHUB_WORKSPACE/cert.pem" -out cert.pem
+          fi
 
-          # Certificado autofirmado nuevo con la misma clave (~27 años)
-          openssl req -new -x509 -key key.pem -sha256 -days 10000 \
-            -subj "/CN=MiApp/O=MiApp/C=PY" -out cert.pem
+          echo "== Certificado =="
+          openssl x509 -in cert.pem -noout -subject -enddate -fingerprint -sha256
 
-          openssl x509 -in cert.pem -noout -subject -enddate
-          openssl pkey -inform DER -in key.pk8 -text -noout | head -1
-
-          rm -f key.raw key.pem
+          # Verificar que la clave corresponde al certificado
+          K=$(openssl pkey -inform DER -in key.pk8 -pubout -outform DER | sha256sum)
+          C=$(openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | sha256sum)
+          if [ "$K" = "$C" ]; then
+            echo "Clave y certificado COINCIDEN"
+          else
+            echo "ERROR: la clave no corresponde a este certificado."; exit 1
+          fi
 
       - name: Alinear y firmar APK
         run: |
@@ -88,7 +91,6 @@ jobs:
             echo "ERROR: no se encontró ningún APK de release."
             find "$DIR" -name "*.apk"; exit 1
           fi
-          echo "APK sin firmar: $UNSIGNED"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
 
@@ -98,7 +100,7 @@ jobs:
             --out app-release-signed.apk \
             "$RUNNER_TEMP/aligned.apk"
 
-          "$BT/apksigner" verify --verbose app-release-signed.apk
+          "$BT/apksigner" verify --verbose --print-certs app-release-signed.apk
 
       - name: Limpiar claves
         if: always()
