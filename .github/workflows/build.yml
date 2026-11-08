@@ -91,23 +91,46 @@ jobs:
         run: |
           unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep -q libgojni.so || echo "::warning::La app libre salio SIN el motor V2Ray (revisa el paso de descarga)"
 
-      # Firma el APK con TU firma (.pk8 + .pem guardados como secretos) y le pone el nombre que
-      # busca el actualizador de la app: "HWID" para la variante fija y "Generador" para la libre.
-      # Si faltan los secretos, el flujo se detiene a propósito: un APK con otra firma no se
-      # podría instalar encima de la app que ya tienen tus usuarios.
+      # Firma el APK con TU firma y le pone el nombre que busca el actualizador de la app:
+      # "HWID" para la variante fija y "Generador" para la libre.
+      # - El CERTIFICADO es público (es el mismo que ya llevan tus APK): va escrito aquí abajo.
+      # - La CLAVE PRIVADA (.pk8) es lo único secreto: va en el secreto KEY_PK8_B64.
+      # Si la clave no corresponde a ese certificado, o el APK queda con otra huella, el flujo se
+      # detiene a propósito: un APK con otra firma no se podría instalar encima de la app instalada.
       - name: Firmar APK con mi firma
         env:
           KEY_PK8_B64: ${{ secrets.KEY_PK8_B64 }}
-          CERT_PEM_B64: ${{ secrets.CERT_PEM_B64 }}
         run: |
           set -eo pipefail
-          if [ -z "$KEY_PK8_B64" ] || [ -z "$CERT_PEM_B64" ]; then
-            echo "::error::Faltan los secretos KEY_PK8_B64 y/o CERT_PEM_B64 (Settings > Secrets and variables > Actions)."
+          if [ -z "$KEY_PK8_B64" ]; then
+            echo "::error::Falta el secreto KEY_PK8_B64 (Settings > Secrets and variables > Actions)."
             exit 1
           fi
-          printf '%s' "$KEY_PK8_B64"  | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/key.raw"
-          printf '%s' "$CERT_PEM_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/cert.raw"
-          echo "Clave: $(wc -c < "$RUNNER_TEMP/key.raw") bytes | Certificado: $(wc -c < "$RUNNER_TEMP/cert.raw") bytes"
+          cat > "$RUNNER_TEMP/cert.pem" <<'CERT_EOF'
+          -----BEGIN CERTIFICATE-----
+          MIIDcjCCAlqgAwIBAgIEVXtosDANBgkqhkiG9w0BAQsFADBSMQkwBwYDVQQGEwAx
+          CTAHBgNVBAgTADEJMAcGA1UEBxMAMQkwBwYDVQQKEwAxEDAOBgNVBAsTB09maWNp
+          YWwxEjAQBgNVBAMMCWVsX3Rpb05lbDAgFw0yNjAzMjYwMTAyNTRaGA81MDI0MDMy
+          OTAxMDI1NFowUjEJMAcGA1UEBhMAMQkwBwYDVQQIEwAxCTAHBgNVBAcTADEJMAcG
+          A1UEChMAMRAwDgYDVQQLEwdPZmljaWFsMRIwEAYDVQQDDAllbF90aW9OZWwwggEi
+          MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDs3QjyQqx4meXIPZ7R/TZ13JWq
+          9+5WBGZVq4qVN5tbryckQ3+LEhhSJlnmWKl7L1j8YZWi+3bV49TVziZu42jsvPqu
+          cLbguAk6eb9VsU2aTG+lPRWSkt21nk9+H9N+beP7N45JV0tGR3hmY1VXn4vsW+hf
+          wAwipKqOKPdUWOMXhMDQ7jW6zgHZE/t0CQSy5X2ydbSKckcCcwROQvuSD6PlGZhj
+          hHFs6sZ8STetIUegrnw92+uYqJj7MAdgMFIU1ww62PN+0rQnZ3Q8QiCobIsTXKuv
+          a0cbrz4z9q2LKvk4jRB8GzVa1LOCkX7k2Y5rz1eaSnsUUOw5KaFnrUSaZNJPAgMB
+          AAGjTjBMMCsGA1UdEAQkMCKADzIwMjYwMzI2MDEwMjU0WoEPNTAyNDAzMjkwMTAy
+          NTRaMB0GA1UdDgQWBBTAulRTp1kNhGVhkJveBhU10bt/tzANBgkqhkiG9w0BAQsF
+          AAOCAQEApa40inouNcFysbGBDq0VPfFQtHikAQWCYNLohZSXQlEjyqDt8PVCRK3G
+          gC1hnxtv5nKQRD6bp9tVyguTPM7lOSaIQYJR8IxzuG2IatRRJN5+SSg08Fb8WTS2
+          3YfIQBnVGMl3o0ozVC1hrju3yCkvjKraMDIjw8XVhwV5arJtDt9UxPXuoatGiy82
+          uO9Wjw2OO+FzXRSB7dEfxXMyFptfD+fr9M/3yUy8QXnAzslyZGhlPLRlVEcHPc0V
+          aIXs4/EQO//PzInt+x8QBFLPwQvSBZhggDb62Ps44lDi2xd3w5H9GlW3nGMN0hXn
+          y9dgqs5Vtzd/xB9MHWLKEj4GCtzP/Q==
+          -----END CERTIFICATE-----
+          CERT_EOF
+          printf '%s' "$KEY_PK8_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/key.raw"
+          echo "Clave recibida: $(wc -c < "$RUNNER_TEMP/key.raw") bytes"
 
           # Clave -> PKCS#8 DER, que es lo que pide apksigner. Acepta PEM o DER, PKCS#8 o RSA clásico.
           KEY_OK=0
@@ -123,22 +146,15 @@ jobs:
             exit 1
           fi
 
-          # Certificado -> PEM (acepta PEM o DER)
-          if ! openssl x509 -inform PEM -in "$RUNNER_TEMP/cert.raw" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
-            if ! openssl x509 -inform DER -in "$RUNNER_TEMP/cert.raw" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
-              echo "::error::El secreto CERT_PEM_B64 no es un certificado (el .pem debe decir BEGIN CERTIFICATE, no PRIVATE KEY)."
-              exit 1
-            fi
-          fi
-
-          # La clave y el certificado deben ser pareja
+          # La clave debe ser pareja del certificado
           A=$(openssl pkey -inform DER -in "$RUNNER_TEMP/key.pk8" -pubout | sha256sum)
           B=$(openssl x509 -in "$RUNNER_TEMP/cert.pem" -pubkey -noout | sha256sum)
           if [ "$A" != "$B" ]; then
-            echo "::error::La clave (.pk8) y el certificado (.pem) no son pareja: no salieron del mismo juego de firma."
+            echo "::error::La clave de KEY_PK8_B64 NO corresponde al certificado de tu app (huella SHA-256 82:50:27:7A...). Esa clave no sirve para actualizar las apps ya instaladas."
             exit 1
           fi
-          openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -subject -fingerprint -sha256
+          echo "Clave y certificado coinciden."
+
           if [ "${{ matrix.variant }}" = "libre" ]; then NOMBRE=Generador; else NOMBRE=HWID; fi
           DIR=proyecto/app/build/outputs/apk/debug
           OUT="$DIR/Conecta_${NOMBRE}_${VERSION_PREFIX//./_}_${{ github.run_number }}.apk"
@@ -146,7 +162,8 @@ jobs:
             --key "$RUNNER_TEMP/key.pk8" --cert "$RUNNER_TEMP/cert.pem" \
             --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
             --out "$OUT" "$DIR/app-debug.apk"
-          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$OUT"   # debe verse tu huella SHA-256
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$OUT" | tee "$RUNNER_TEMP/verify.txt"
+          grep -qi "SHA-256 digest: 8250277add" "$RUNNER_TEMP/verify.txt" || { echo "::error::El APK firmado no tiene la huella esperada de tu firma."; exit 1; }
           echo "APK_FIRMADO=$OUT" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
