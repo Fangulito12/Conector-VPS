@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -25,6 +28,15 @@ jobs:
           set -eo pipefail
           unzip -q proyecto.zip -d src_proyecto
           find src_proyecto -maxdepth 3 | head -60
+
+      - name: Buscar cómo actualiza la app
+        run: |
+          echo "== URLs de GitHub / actualización =="
+          grep -rnE "api\.github\.com|raw\.githubusercontent|github\.com/[^\"' ]+|releases/latest|version\.json|update" \
+            --include=*.java --include=*.kt --include=*.xml --include=*.json --include=*.gradle \
+            src_proyecto 2>/dev/null | grep -v "/build/" | head -40 || true
+          echo "== Versión actual =="
+          grep -rnE "versionCode|versionName" --include=build.gradle --include=build.gradle.kts src_proyecto | head || true
 
       - name: Desactivar R8 / minificación
         run: |
@@ -72,7 +84,6 @@ jobs:
           set -eo pipefail
           cd "$RUNNER_TEMP"
 
-          # Clave -> PKCS#8 DER sin cifrar
           echo "$KEY_B64" | tr -d ' \r\n' | base64 -d > key.raw
           if grep -aq "BEGIN" key.raw; then
             openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in key.raw -out key.pk8
@@ -81,7 +92,6 @@ jobs:
           fi
           rm -f key.raw
 
-          # Certificado: sin openssl (rechaza el país vacío), directo a DER
           sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$GITHUB_WORKSPACE/cert.pem" \
             | grep -v -- '-----' | tr -d ' \r\n\t' | base64 -d > cert.der
 
@@ -118,3 +128,23 @@ jobs:
         with:
           name: apk-firmado
           path: app-release-signed.apk
+
+      - name: Publicar Release (para el actualizador)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          VN=$(grep -rhoE "versionName[[:space:]]*=?[[:space:]]*[\"'][^\"']+[\"']" \
+                 --include=build.gradle --include=build.gradle.kts src_proyecto \
+               | head -1 | sed -E "s/.*[\"']([^\"']+)[\"']/\1/")
+          if [ -n "$VN" ]; then TAG="v$VN"; else TAG="v$(date +%Y.%m.%d-%H%M)"; fi
+          echo "Tag del release: $TAG"
+
+          # Si ya existe un release con ese tag, se reemplaza
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+
+          gh release create "$TAG" app-release-signed.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes "Build automático" \
+            --latest
