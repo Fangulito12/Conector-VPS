@@ -26,6 +26,21 @@ jobs:
           unzip -q proyecto.zip -d src_proyecto
           find src_proyecto -maxdepth 3 | head -60
 
+      - name: Desactivar R8 / minificación
+        run: |
+          set -eo pipefail
+          FILES=$(find src_proyecto \( -name build.gradle -o -name build.gradle.kts \) -not -path "*/node_modules/*")
+          for f in $FILES; do
+            sed -i -E \
+              -e 's/(minifyEnabled[[:space:]]*=?[[:space:]]*)true/\1false/g' \
+              -e 's/(isMinifyEnabled[[:space:]]*=?[[:space:]]*)true/\1false/g' \
+              -e 's/(shrinkResources[[:space:]]*=?[[:space:]]*)true/\1false/g' \
+              -e 's/(isShrinkResources[[:space:]]*=?[[:space:]]*)true/\1false/g' \
+              "$f"
+          done
+          echo "== Estado final =="
+          grep -rniE "minify|shrinkResources" $FILES || echo "(no hay opciones de minify en los build.gradle)"
+
       - name: Compilar APK sin firmar
         run: |
           set -eo pipefail
@@ -43,6 +58,13 @@ jobs:
             gradle assembleRelease
           fi
 
+      - name: Ver librerías nativas del APK
+        run: |
+          DIR=$(cat "$RUNNER_TEMP/projdir.txt")
+          APK=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
+          echo "APK: $APK"
+          unzip -l "$APK" | grep -E "\.so|classes" || echo "sin .so"
+
       - name: Preparar clave y certificado
         env:
           KEY_B64: ${{ secrets.KEY_PK8_B64 }}
@@ -59,8 +81,7 @@ jobs:
           fi
           rm -f key.raw
 
-          # Certificado: NO se pasa por openssl (rechaza el país vacío).
-          # Se extrae el cuerpo base64 y se convierte a DER.
+          # Certificado: sin openssl (rechaza el país vacío), directo a DER
           sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$GITHUB_WORKSPACE/cert.pem" \
             | grep -v -- '-----' | tr -d ' \r\n\t' | base64 -d > cert.der
 
@@ -77,7 +98,6 @@ jobs:
             echo "ERROR: no se encontró ningún APK de release."
             find "$DIR" -name "*.apk"; exit 1
           fi
-          echo "APK sin firmar: $UNSIGNED"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
 
