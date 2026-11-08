@@ -50,49 +50,33 @@ jobs:
             gradle assembleRelease
           fi
 
-      - name: Preparar y validar clave y certificado
+      - name: Preparar clave y generar certificado
         env:
           KEY_B64: ${{ secrets.KEY_PK8_B64 }}
-          CERT_B64: ${{ secrets.CERT_PEM_B64 }}
         run: |
           set -eo pipefail
           cd "$RUNNER_TEMP"
 
-          echo "$KEY_B64"  | tr -d ' \r\n' | base64 -d > key.raw
-          echo "$CERT_B64" | tr -d ' \r\n' | base64 -d > cert.raw
+          echo "$KEY_B64" | tr -d ' \r\n' | base64 -d > key.raw
 
-          echo "== Tipo de archivos =="
-          file key.raw cert.raw
-          echo "-- key.raw:";  grep -a "BEGIN\|END" key.raw  || echo "(binario/DER)"
-          echo "-- cert.raw:"; grep -a "BEGIN\|END" cert.raw || echo "(binario/DER)"
-
-          if grep -aq "BEGIN CERTIFICATE" key.raw && ! grep -aq "PRIVATE KEY" key.raw; then
-            echo "ERROR: el secreto de la CLAVE contiene un certificado. Los secretos están intercambiados."; exit 1
-          fi
-          if grep -aq "PRIVATE KEY" cert.raw; then
-            echo "ERROR: el secreto del CERTIFICADO contiene una clave privada (¿intercambiados o archivo combinado?)."; exit 1
-          fi
-
+          # Clave -> PKCS#8 DER sin cifrar (para apksigner)
           if grep -aq "BEGIN" key.raw; then
             openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in key.raw -out key.pk8
           else
             openssl pkcs8 -topk8 -nocrypt -inform DER -outform DER -in key.raw -out key.pk8
           fi
 
-          if grep -aq "BEGIN CERTIFICATE" cert.raw; then
-            openssl x509 -in cert.raw -out cert.pem
-          else
-            openssl x509 -inform DER -in cert.raw -out cert.pem
-          fi
+          # Clave en PEM, solo para crear el certificado
+          openssl pkey -inform DER -in key.pk8 -out key.pem
+
+          # Certificado autofirmado nuevo con la misma clave (~27 años)
+          openssl req -new -x509 -key key.pem -sha256 -days 10000 \
+            -subj "/CN=MiApp/O=MiApp/C=PY" -out cert.pem
 
           openssl x509 -in cert.pem -noout -subject -enddate
           openssl pkey -inform DER -in key.pk8 -text -noout | head -1
 
-          K=$(openssl pkey -inform DER -in key.pk8 -pubout -outform DER | sha256sum)
-          C=$(openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | sha256sum)
-          [ "$K" = "$C" ] && echo "Clave y certificado COINCIDEN" || { echo "ERROR: no coinciden"; exit 1; }
-
-          rm -f key.raw cert.raw
+          rm -f key.raw key.pem
 
       - name: Alinear y firmar APK
         run: |
