@@ -1,183 +1,65 @@
-name: Build APK
+name: Build y firma APK
+
 on:
-  push:
   workflow_dispatch:
-    inputs:
-      notas:
-        description: "Novedades de esta versión (se muestran en el aviso de actualización de la app)"
-        required: false
-        default: ""
-
-permissions:
-  contents: read
-
-env:
-  # Debe coincidir con el principio de versionName en app/build.gradle.
-  # Repositorio de clientes: "1.24"  |  Repositorio tuyo (calibración nueva): "1.25"
-  VERSION_PREFIX: "1.24"
+  push:
+    branches: [main]
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [fijo, libre]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Descomprimir proyecto
-        run: unzip -q proyecto.zip -d proyecto
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: 17
 
-      - name: Descargar hev-socks5-tunnel
-        run: git clone --recursive --depth 1 --shallow-submodules https://github.com/heiher/hev-socks5-tunnel proyecto/app/src/main/jni/hev-socks5-tunnel
-
-      - name: Mostrar funciones nativas de hev (para diagnóstico)
+      - name: Compilar APK sin firmar
         run: |
-          f=$(grep -rl RegisterNatives proyecto/app/src/main/jni/hev-socks5-tunnel/src | head -1)
-          echo "Archivo JNI: $f"
-          grep -n 'TProxy' "$f" || true
-          grep -q '(Ljava/lang/String;I)Z' "$f" || echo "::warning::La firma de TProxyStartService en hev no es la esperada (Z). Avísame."
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
 
-      - name: Instalar NDK y SDK
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
-
-      # Motor V2Ray (solo en la variante libre). Si la descarga falla, la app compila igual
-      # pero sale sin V2Ray y el boton avisa que no esta incluido.
-      - name: Descargar motor V2Ray (solo libre)
-        if: matrix.variant == 'libre'
+      - name: Preparar y validar clave y certificado
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p proyecto/app/libs
-          if gh release download v26.7.31 --repo 2dust/AndroidLibXrayLite --pattern '*.aar' --dir proyecto/app/libs; then
-            n=$(ls proyecto/app/libs/*.aar | wc -l)
-            if [ "$n" -ne 1 ]; then rm -f proyecto/app/libs/*.aar; echo "::warning::Se esperaba un solo .aar; la app libre saldra sin V2Ray"; fi
-          else
-            echo "::warning::No se pudo descargar el motor V2Ray; la app libre saldra sin V2Ray"
-          fi
-
-      # La variante "fijo" lleva la IP de tu VPS (secretos de GitHub) y sale lista para conectar.
-      # La variante "libre" no lleva ningún dato: el que la instale debe escribir el servidor o
-      # importar un perfil .conecta. Las dos salen de esta misma compilación, con la misma firma
-      # (mismo HWID en ambas), pero con nombres de paquete distintos para poder tener las dos
-      # instaladas a la vez si hace falta.
-      - name: Compilar (${{ matrix.variant }})
-        working-directory: proyecto
-        env:
-          SERVER_HOST: ${{ matrix.variant == 'fijo' && secrets.SERVER_HOST || '' }}
-          SERVER_PORT: ${{ matrix.variant == 'fijo' && secrets.SERVER_PORT || '' }}
-          UDPGW_PORT: ${{ matrix.variant == 'fijo' && secrets.UDPGW_PORT || '' }}
-          APP_SUFFIX: ${{ matrix.variant == 'libre' && '.libre' || '' }}
-        run: gradle assembleDebug --no-daemon
-
-      - name: Verificar que el APK trae el túnel nativo
-        run: |
-          unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep libhev-socks5-tunnel.so
-
-      - name: Avisar si la app libre salió sin el motor V2Ray
-        if: matrix.variant == 'libre'
-        run: |
-          unzip -l proyecto/app/build/outputs/apk/debug/app-debug.apk | grep -q libgojni.so || echo "::warning::La app libre salio SIN el motor V2Ray (revisa el paso de descarga)"
-
-      # Firma el APK con TU firma (.pk8 + .pem guardados como secretos) y le pone el nombre que
-      # busca el actualizador de la app: "HWID" para la variante fija y "Generador" para la libre.
-      # Si faltan los secretos, el flujo se detiene a propósito: un APK con otra firma no se
-      # podría instalar encima de la app que ya tienen tus usuarios.
-      - name: Firmar APK con mi firma
-        env:
-          KEY_PK8_B64: ${{ secrets.KEY_PK8_B64 }}
-          CERT_PEM_B64: ${{ secrets.CERT_PEM_B64 }}
+          KEY_B64: ${{ secrets.KEY_PK8_B64 }}
+          CERT_B64: ${{ secrets.CERT_PEM_B64 }}
         run: |
           set -eo pipefail
-          if [ -z "$KEY_PK8_B64" ] || [ -z "$CERT_PEM_B64" ]; then
-            echo "::error::Faltan los secretos KEY_PK8_B64 y/o CERT_PEM_B64 (Settings > Secrets and variables > Actions)."
-            exit 1
-          fi
-          printf '%s' "$KEY_PK8_B64"  | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/key.raw"
-          printf '%s' "$CERT_PEM_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/cert.raw"
-          echo "Clave: $(wc -c < "$RUNNER_TEMP/key.raw") bytes | Certificado: $(wc -c < "$RUNNER_TEMP/cert.raw") bytes"
+          cd "$RUNNER_TEMP"
 
-          # Clave -> PKCS#8 DER, que es lo que pide apksigner. Acepta PEM o DER, PKCS#8 o RSA clásico.
-          KEY_OK=0
-          for inform in PEM DER; do
-            for opt in "" "-topk8"; do
-              if openssl pkcs8 $opt -nocrypt -inform $inform -in "$RUNNER_TEMP/key.raw" -outform DER -out "$RUNNER_TEMP/key.pk8" 2>/dev/null; then
-                KEY_OK=1; break 2
-              fi
-            done
-          done
-          if [ "$KEY_OK" != 1 ]; then
-            echo "::error::No se pudo leer la clave privada del secreto KEY_PK8_B64. Puede estar dañada o protegida con contraseña. Vuelve a crear el secreto con: base64 -w0 tu-clave.pk8 (primeros bytes recibidos: $(head -c 4 "$RUNNER_TEMP/key.raw" | od -An -tx1))"
-            exit 1
+          # Decodificar (tr elimina saltos de línea, espacios y CR por si acaso)
+          echo "$KEY_B64"  | tr -d ' \r\n' | base64 -d > key.raw
+          echo "$CERT_B64" | tr -d ' \r\n' | base64 -d > cert.raw
+
+          echo "== Tipo de archivos =="
+          file key.raw cert.raw
+          echo "== Cabeceras PEM (si las hay) =="
+          echo "-- key.raw:";  grep -a "BEGIN\|END" key.raw  || echo "(binario/DER)"
+          echo "-- cert.raw:"; grep -a "BEGIN\|END" cert.raw || echo "(binario/DER)"
+
+          # Detectar secretos intercambiados
+          if grep -aq "BEGIN CERTIFICATE" key.raw && ! grep -aq "PRIVATE KEY" key.raw; then
+            echo "ERROR: el secreto de la CLAVE contiene un certificado. Los secretos están intercambiados."; exit 1
+          fi
+          if grep -aq "PRIVATE KEY" cert.raw; then
+            echo "ERROR: el secreto del CERTIFICADO contiene una clave privada (¿intercambiados o archivo combinado?)."; exit 1
           fi
 
-          # Certificado -> PEM (acepta PEM o DER)
-          if ! openssl x509 -inform PEM -in "$RUNNER_TEMP/cert.raw" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
-            if ! openssl x509 -inform DER -in "$RUNNER_TEMP/cert.raw" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null; then
-              echo "::error::El secreto CERT_PEM_B64 no es un certificado (el .pem debe decir BEGIN CERTIFICATE, no PRIVATE KEY)."
-              exit 1
-            fi
+          # Clave -> PKCS#8 DER sin cifrar (acepta PEM o DER de entrada)
+          if grep -aq "BEGIN" key.raw; then
+            openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in key.raw -out key.pk8
+          else
+            openssl pkcs8 -topk8 -nocrypt -inform DER -outform DER -in key.raw -out key.pk8
           fi
 
-          # La clave y el certificado deben ser pareja
-          A=$(openssl pkey -inform DER -in "$RUNNER_TEMP/key.pk8" -pubout | sha256sum)
-          B=$(openssl x509 -in "$RUNNER_TEMP/cert.pem" -pubkey -noout | sha256sum)
-          if [ "$A" != "$B" ]; then
-            echo "::error::La clave (.pk8) y el certificado (.pem) no son pareja: no salieron del mismo juego de firma."
-            exit 1
+          # Certificado -> PEM limpio (acepta PEM o DER de entrada)
+          if grep -aq "BEGIN CERTIFICATE" cert.raw; then
+            openssl x509 -in cert.raw -out cert.pem
+          else
+            openssl x509 -inform DER -in cert.raw -out cert.pem
           fi
-          openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -subject -fingerprint -sha256
-          if [ "${{ matrix.variant }}" = "libre" ]; then NOMBRE=Generador; else NOMBRE=HWID; fi
-          DIR=proyecto/app/build/outputs/apk/debug
-          OUT="$DIR/Conecta_${NOMBRE}_${VERSION_PREFIX//./_}_${{ github.run_number }}.apk"
-          "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
-            --key "$RUNNER_TEMP/key.pk8" --cert "$RUNNER_TEMP/cert.pem" \
-            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
-            --out "$OUT" "$DIR/app-debug.apk"
-          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$OUT"   # debe verse tu huella SHA-256
-          echo "APK_FIRMADO=$OUT" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Conecta-HWID-${{ matrix.variant }}-APK
-          path: ${{ env.APK_FIRMADO }}
-
-  # Publica el Release que usa el actualizador de la app. Solo corre cuando lo pides tú:
-  # pestaña Actions > Build APK > "Run workflow" (ahí puedes escribir las novedades).
-  # Con un simple "push" solo se compila, y los usuarios no reciben nada.
-  # Si algún día quieres publicar en cada push, borra la línea "if:" de este job.
-  release:
-    needs: build
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: apks
-          merge-multiple: true
-
-      - name: Ver archivos a publicar
-        run: ls -la apks
-
-      - name: Publicar Release (actualizador de la app)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.VERSION_PREFIX }}.${{ github.run_number }}
-          name: Conecta v${{ env.VERSION_PREFIX }}.${{ github.run_number }}
-          body: ${{ inputs.notas }}
-          files: apks/*.apk
-          make_latest: true
+          echo "== Info del certificado =="
+          openssl x509 -in cert.pem
