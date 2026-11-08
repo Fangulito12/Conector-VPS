@@ -2,6 +2,11 @@ name: Build y firma APK
 
 on:
   workflow_dispatch:
+    inputs:
+      publicar:
+        description: "Publicar Release para el actualizador"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -23,35 +28,38 @@ jobs:
         with:
           gradle-version: 8.7
 
+      - name: Instalar NDK y CMake
+        run: |
+          set -eo pipefail
+          SDKM=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | head -1)
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          "$SDKM" "ndk;26.1.10909125" "cmake;3.22.1" >/dev/null || echo "(no se pudo instalar NDK, se sigue igual)"
+
       - name: Descomprimir proyecto
         run: |
           set -eo pipefail
           unzip -q proyecto.zip -d src_proyecto
           find src_proyecto -maxdepth 3 | head -60
 
-      - name: Buscar cómo actualiza la app
+      - name: Diagnóstico del código nativo en el proyecto
         run: |
-          echo "== URLs de GitHub / actualización =="
-          grep -rnE "api\.github\.com|raw\.githubusercontent|github\.com/[^\"' ]+|releases/latest|version\.json|update" \
-            --include=*.java --include=*.kt --include=*.xml --include=*.json --include=*.gradle \
-            src_proyecto 2>/dev/null | grep -v "/build/" | head -40 || true
+          echo "== Archivos de build nativo =="
+          find src_proyecto \( -name "Android.mk" -o -name "Application.mk" -o -name "CMakeLists.txt" -o -name ".gitmodules" -o -name "*.so" \) | head -30
+          echo "== Carpetas jni / jniLibs / hev =="
+          find src_proyecto -type d \( -name jni -o -name jniLibs -o -name "hev-*" \) | head -20
+          echo "== Contenido de las carpetas hev (¿vacías?) =="
+          for d in $(find src_proyecto -type d -name "hev-*" | head -5); do
+            echo "$d -> $(find "$d" -type f | wc -l) archivos"
+          done
+          echo "== Config nativa en gradle =="
+          grep -rnE "externalNativeBuild|ndkBuild|cmake|abiFilters|jniLibs|useLegacyPackaging|ndkVersion" \
+            --include=build.gradle --include=build.gradle.kts src_proyecto | head -20 || true
+          echo "== Cómo actualiza la app =="
+          grep -rnE "api\.github\.com|raw\.githubusercontent|releases/latest|version\.json" \
+            --include=*.java --include=*.kt --include=*.xml --include=*.json \
+            src_proyecto 2>/dev/null | grep -v "/build/" | head -15 || true
           echo "== Versión actual =="
           grep -rnE "versionCode|versionName" --include=build.gradle --include=build.gradle.kts src_proyecto | head || true
-
-      - name: Desactivar R8 / minificación
-        run: |
-          set -eo pipefail
-          FILES=$(find src_proyecto \( -name build.gradle -o -name build.gradle.kts \) -not -path "*/node_modules/*")
-          for f in $FILES; do
-            sed -i -E \
-              -e 's/(minifyEnabled[[:space:]]*=?[[:space:]]*)true/\1false/g' \
-              -e 's/(isMinifyEnabled[[:space:]]*=?[[:space:]]*)true/\1false/g' \
-              -e 's/(shrinkResources[[:space:]]*=?[[:space:]]*)true/\1false/g' \
-              -e 's/(isShrinkResources[[:space:]]*=?[[:space:]]*)true/\1false/g' \
-              "$f"
-          done
-          echo "== Estado final =="
-          grep -rniE "minify|shrinkResources" $FILES || echo "(no hay opciones de minify en los build.gradle)"
 
       - name: Compilar APK sin firmar
         run: |
@@ -70,12 +78,38 @@ jobs:
             gradle assembleRelease
           fi
 
-      - name: Ver librerías nativas del APK
+      - name: Comparar .so del APK nuevo con vieja.apk y reparar faltantes
         run: |
+          set -eo pipefail
           DIR=$(cat "$RUNNER_TEMP/projdir.txt")
-          APK=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
-          echo "APK: $APK"
-          unzip -l "$APK" | grep -E "\.so|classes" || echo "sin .so"
+          NEW=$(realpath "$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)")
+          echo "$NEW" > "$RUNNER_TEMP/newapk.txt"
+          echo "APK nuevo: $NEW"
+
+          echo "== .so en el APK NUEVO =="
+          unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/new_so.txt" || echo "NINGUNO"
+
+          if [ ! -f vieja.apk ]; then
+            echo "(No hay vieja.apk en la raíz del repo: no se puede reparar)"; exit 0
+          fi
+
+          echo "== .so en vieja.apk =="
+          unzip -l vieja.apk | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/old_so.txt" || echo "NINGUNO"
+
+          # .so que tiene la vieja y le faltan a la nueva
+          comm -23 "$RUNNER_TEMP/old_so.txt" "$RUNNER_TEMP/new_so.txt" > "$RUNNER_TEMP/missing_so.txt" || true
+          echo "== .so FALTANTES en el nuevo =="
+          cat "$RUNNER_TEMP/missing_so.txt" || true
+
+          if [ -s "$RUNNER_TEMP/missing_so.txt" ]; then
+            mkdir -p "$RUNNER_TEMP/oldx"
+            unzip -q vieja.apk 'lib/*' -d "$RUNNER_TEMP/oldx"
+            ( cd "$RUNNER_TEMP/oldx" && xargs -a "$RUNNER_TEMP/missing_so.txt" zip -0 "$NEW" )
+            echo "== Reparado: .so copiados de vieja.apk al APK nuevo =="
+            unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort
+          else
+            echo "No faltan .so respecto a vieja.apk."
+          fi
 
       - name: Preparar clave y certificado
         env:
@@ -102,12 +136,7 @@ jobs:
         run: |
           set -eo pipefail
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          DIR=$(cat "$RUNNER_TEMP/projdir.txt")
-          UNSIGNED=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
-          if [ -z "$UNSIGNED" ]; then
-            echo "ERROR: no se encontró ningún APK de release."
-            find "$DIR" -name "*.apk"; exit 1
-          fi
+          UNSIGNED=$(cat "$RUNNER_TEMP/newapk.txt")
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
 
@@ -119,6 +148,9 @@ jobs:
 
           "$BT/apksigner" verify --verbose --print-certs app-release-signed.apk
 
+          echo "== .so en el APK FINAL =="
+          unzip -l app-release-signed.apk | awk '{print $4}' | grep '\.so$' | sort || echo "NINGUNO"
+
       - name: Limpiar claves
         if: always()
         run: rm -f "$RUNNER_TEMP"/key.pk8 "$RUNNER_TEMP"/cert.der
@@ -129,7 +161,8 @@ jobs:
           name: apk-firmado
           path: app-release-signed.apk
 
-      - name: Publicar Release (para el actualizador)
+      - name: Publicar Release (solo si lo pedís a mano)
+        if: github.event_name == 'workflow_dispatch' && inputs.publicar
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -139,10 +172,7 @@ jobs:
                | head -1 | sed -E "s/.*[\"']([^\"']+)[\"']/\1/")
           if [ -n "$VN" ]; then TAG="v$VN"; else TAG="v$(date +%Y.%m.%d-%H%M)"; fi
           echo "Tag del release: $TAG"
-
-          # Si ya existe un release con ese tag, se reemplaza
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
-
           gh release create "$TAG" app-release-signed.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
