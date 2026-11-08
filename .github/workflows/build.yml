@@ -34,35 +34,15 @@ jobs:
           unzip -q proyecto.zip -d src_proyecto
           find src_proyecto -maxdepth 3 | head -40
 
-      - name: Copiar librerías nativas del APK que funciona
+      - name: Verificar librerías nativas del proyecto
         run: |
           set -eo pipefail
-          BASE=$(find . -type f -iname "*.apk" \
-                   -not -path "./src_proyecto/*" -not -path "./.git/*" | head -1)
-          if [ -z "$BASE" ]; then
-            echo "ERROR: no hay ningún .apk en el repo. Subí Conecta_HWID_1_24_67.apk (Add file > Upload files)."
-            find . -type f -not -path "./.git/*" -not -path "./src_proyecto/*" | head -50
-            exit 1
-          fi
-          echo "APK base: $BASE"
-
-          MANIFEST=$(find src_proyecto -path "*src/main/AndroidManifest.xml" -not -path "*/build/*" | head -1)
-          [ -n "$MANIFEST" ] || { echo "ERROR: no se encontró AndroidManifest.xml"; exit 1; }
-          MAIN=$(dirname "$MANIFEST")
-          MODULE=$(dirname "$(dirname "$MAIN")")
-
-          mkdir -p "$RUNNER_TEMP/basex"
-          unzip -q "$BASE" 'lib/*' -d "$RUNNER_TEMP/basex" \
-            || { echo "ERROR: ese APK no tiene carpeta lib/"; exit 1; }
-          mkdir -p "$MAIN/jniLibs"
-          cp -r "$RUNNER_TEMP/basex/lib/." "$MAIN/jniLibs/"
           echo "== jniLibs =="
-          find "$MAIN/jniLibs" -type f | sort
-
-          # El túnel ya viene compilado: se quita el build nativo (su código no está en el zip)
-          perl -0pi -e 's/[ \t]*externalNativeBuild\s*\{\s*ndkBuild\s*\{[^}]*\}\s*\}[ \t]*\n?//s; s/[ \t]*ndkVersion\s+[^\n]*\n//' "$MODULE/build.gradle"
-          echo "== Restos de build nativo en build.gradle (debe quedar vacío) =="
-          grep -nE "externalNativeBuild|ndkBuild|ndkVersion" "$MODULE/build.gradle" || echo "(ninguno)"
+          find src_proyecto -path "*jniLibs*" -name "*.so" | sort
+          find src_proyecto -path "*jniLibs*" -name "libhev-socks5-tunnel.so" | grep -q . \
+            || { echo "ERROR: el proyecto.zip no trae los .so. Subí el proyecto.zip preparado."; exit 1; }
+          echo "== Restos de build nativo (debe quedar vacío) =="
+          grep -rnE "externalNativeBuild|ndkBuild|ndkVersion" --include=build.gradle src_proyecto || echo "(ninguno)"
 
       - name: Compilar APK (debug con R8, como tu build original)
         env:
