@@ -7,6 +7,10 @@ on:
         description: "Publicar Release (opcional)"
         type: boolean
         default: false
+      notas:
+        description: "Novedades de esta versión (salen en el aviso de actualización de la app)"
+        type: string
+        default: ""
   push:
     branches: [main]
 
@@ -147,9 +151,14 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.publicar
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTAS: ${{ inputs.notas }}
         run: |
           set -eo pipefail
+          # La etiqueta debe ser igual al versionName de la app (1.24.<n>): así el actualizador
+          # sabe si la versión del Release es más nueva que la instalada.
           TAG="v1.24.${GITHUB_RUN_NUMBER}"
+          # Un solo APK por Release: el actualizador de la app descarga ese.
+          cp app-release-signed.apk "Conecta_1_24_${GITHUB_RUN_NUMBER}.apk"
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
-          gh release create "$TAG" app-release-signed.apk \
-            --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Build automático" --latest
+          gh release create "$TAG" "Conecta_1_24_${GITHUB_RUN_NUMBER}.apk" \
+            --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "${NOTAS:-Build automático}" --latest
