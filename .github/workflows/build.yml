@@ -16,26 +16,39 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
       - name: Descomprimir proyecto
         run: |
           set -eo pipefail
-          ls -la
           unzip -q proyecto.zip -d src_proyecto
-          echo "== Archivos gradlew encontrados =="
-          find src_proyecto -name gradlew
+          echo "== Primeros niveles del zip =="
+          find src_proyecto -maxdepth 3 | head -60
+          echo "== Archivos clave =="
+          find src_proyecto \( -name gradlew -o -name settings.gradle -o -name settings.gradle.kts \
+            -o -name build.gradle -o -name build.gradle.kts -o -name pubspec.yaml \
+            -o -name config.xml -o -name package.json -o -name "*.apk" -o -name "*.aia" \) \
+            -not -path "*/node_modules/*" | head -40
 
       - name: Compilar APK sin firmar
         run: |
           set -eo pipefail
-          GRADLEW=$(find src_proyecto -name gradlew | head -1)
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: no hay gradlew dentro del zip. Mira la lista de archivos del paso anterior."; exit 1
+          SETTINGS=$(find src_proyecto \( -name settings.gradle -o -name settings.gradle.kts \) | head -1)
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: no hay settings.gradle en el zip, así que no es un proyecto Gradle/Android nativo."
+            echo "Revisá la lista de archivos del paso anterior."; exit 1
           fi
-          DIR=$(dirname "$GRADLEW")
+          DIR=$(dirname "$SETTINGS")
           echo "$DIR" > "$RUNNER_TEMP/projdir.txt"
           cd "$DIR"
-          chmod +x ./gradlew
-          ./gradlew assembleRelease
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleRelease
+          else
+            gradle assembleRelease
+          fi
 
       - name: Preparar y validar clave y certificado
         env:
@@ -87,6 +100,10 @@ jobs:
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           DIR=$(cat "$RUNNER_TEMP/projdir.txt")
           UNSIGNED=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
+          if [ -z "$UNSIGNED" ]; then
+            echo "ERROR: no se encontró ningún APK de release."
+            find "$DIR" -name "*.apk"; exit 1
+          fi
           echo "APK sin firmar: $UNSIGNED"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
