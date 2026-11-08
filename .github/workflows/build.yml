@@ -28,37 +28,46 @@ jobs:
         with:
           gradle-version: 8.7
 
-      - name: Instalar NDK y CMake
-        run: |
-          set -eo pipefail
-          SDKM=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | head -1)
-          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
-          "$SDKM" "ndk;26.1.10909125" "cmake;3.22.1" >/dev/null || echo "(no se pudo instalar NDK, se sigue igual)"
-
       - name: Descomprimir proyecto
         run: |
           set -eo pipefail
           unzip -q proyecto.zip -d src_proyecto
           find src_proyecto -maxdepth 3 | head -60
 
-      - name: Diagnóstico del código nativo en el proyecto
+      - name: Copiar librerías nativas del APK que funciona
         run: |
-          echo "== Archivos de build nativo =="
-          find src_proyecto \( -name "Android.mk" -o -name "Application.mk" -o -name "CMakeLists.txt" -o -name ".gitmodules" -o -name "*.so" \) | head -30
-          echo "== Carpetas jni / jniLibs / hev =="
-          find src_proyecto -type d \( -name jni -o -name jniLibs -o -name "hev-*" \) | head -20
-          echo "== Contenido de las carpetas hev (¿vacías?) =="
-          for d in $(find src_proyecto -type d -name "hev-*" | head -5); do
-            echo "$d -> $(find "$d" -type f | wc -l) archivos"
-          done
-          echo "== Config nativa en gradle =="
-          grep -rnE "externalNativeBuild|ndkBuild|cmake|abiFilters|jniLibs|useLegacyPackaging|ndkVersion" \
-            --include=build.gradle --include=build.gradle.kts src_proyecto | head -20 || true
-          echo "== Cómo actualiza la app =="
+          set -eo pipefail
+          BASE=$(ls *.apk 2>/dev/null | head -1 || true)
+          if [ -z "$BASE" ]; then
+            echo "ERROR: falta el APK que funciona (Conecta_HWID_1_24_67.apk) en la raíz del repo."; exit 1
+          fi
+          echo "APK base: $BASE"
+
+          MANIFEST=$(find src_proyecto -path "*src/main/AndroidManifest.xml" -not -path "*/build/*" | head -1)
+          if [ -z "$MANIFEST" ]; then
+            echo "ERROR: no se encontró src/main/AndroidManifest.xml en el proyecto."; exit 1
+          fi
+          MAIN=$(dirname "$MANIFEST")
+          echo "Módulo principal: $MAIN"
+
+          mkdir -p "$RUNNER_TEMP/basex"
+          unzip -q "$BASE" 'lib/*' -d "$RUNNER_TEMP/basex"
+          mkdir -p "$MAIN/jniLibs"
+          cp -r "$RUNNER_TEMP/basex/lib/." "$MAIN/jniLibs/"
+
+          echo "== jniLibs del proyecto =="
+          find "$MAIN/jniLibs" -type f | sort
+
+          echo "== Configuración nativa del proyecto (informativo) =="
+          grep -rnE "abiFilters|jniLibs|useLegacyPackaging|externalNativeBuild" \
+            --include=build.gradle --include=build.gradle.kts src_proyecto || echo "(sin configuración especial)"
+
+      - name: Buscar cómo actualiza la app (informativo)
+        run: |
           grep -rnE "api\.github\.com|raw\.githubusercontent|releases/latest|version\.json" \
             --include=*.java --include=*.kt --include=*.xml --include=*.json \
             src_proyecto 2>/dev/null | grep -v "/build/" | head -15 || true
-          echo "== Versión actual =="
+          echo "== Versión =="
           grep -rnE "versionCode|versionName" --include=build.gradle --include=build.gradle.kts src_proyecto | head || true
 
       - name: Compilar APK sin firmar
@@ -78,37 +87,20 @@ jobs:
             gradle assembleRelease
           fi
 
-      - name: Comparar .so del APK nuevo con vieja.apk y reparar faltantes
+      - name: Verificar que el APK nuevo trae los .so
         run: |
           set -eo pipefail
           DIR=$(cat "$RUNNER_TEMP/projdir.txt")
           NEW=$(realpath "$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)")
+          if [ -z "$NEW" ]; then
+            echo "ERROR: no se encontró ningún APK de release."; find "$DIR" -name "*.apk"; exit 1
+          fi
           echo "$NEW" > "$RUNNER_TEMP/newapk.txt"
           echo "APK nuevo: $NEW"
-
-          echo "== .so en el APK NUEVO =="
-          unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/new_so.txt" || echo "NINGUNO"
-
-          if [ ! -f vieja.apk ]; then
-            echo "(No hay vieja.apk en la raíz del repo: no se puede reparar)"; exit 0
-          fi
-
-          echo "== .so en vieja.apk =="
-          unzip -l vieja.apk | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/old_so.txt" || echo "NINGUNO"
-
-          # .so que tiene la vieja y le faltan a la nueva
-          comm -23 "$RUNNER_TEMP/old_so.txt" "$RUNNER_TEMP/new_so.txt" > "$RUNNER_TEMP/missing_so.txt" || true
-          echo "== .so FALTANTES en el nuevo =="
-          cat "$RUNNER_TEMP/missing_so.txt" || true
-
-          if [ -s "$RUNNER_TEMP/missing_so.txt" ]; then
-            mkdir -p "$RUNNER_TEMP/oldx"
-            unzip -q vieja.apk 'lib/*' -d "$RUNNER_TEMP/oldx"
-            ( cd "$RUNNER_TEMP/oldx" && xargs -a "$RUNNER_TEMP/missing_so.txt" zip -0 "$NEW" )
-            echo "== Reparado: .so copiados de vieja.apk al APK nuevo =="
-            unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort
-          else
-            echo "No faltan .so respecto a vieja.apk."
+          echo "== .so en el APK nuevo =="
+          unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/new_so.txt"
+          if ! grep -q "libhev-socks5-tunnel.so" "$RUNNER_TEMP/new_so.txt"; then
+            echo "ERROR: el APK nuevo no trae libhev-socks5-tunnel.so"; exit 1
           fi
 
       - name: Preparar clave y certificado
@@ -149,7 +141,7 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs app-release-signed.apk
 
           echo "== .so en el APK FINAL =="
-          unzip -l app-release-signed.apk | awk '{print $4}' | grep '\.so$' | sort || echo "NINGUNO"
+          unzip -l app-release-signed.apk | awk '{print $4}' | grep '\.so$' | sort
 
       - name: Limpiar claves
         if: always()
