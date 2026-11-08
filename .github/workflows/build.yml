@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       publicar:
-        description: "Publicar Release para el actualizador"
+        description: "Publicar Release (opcional)"
         type: boolean
         default: false
   push:
@@ -32,88 +32,85 @@ jobs:
         run: |
           set -eo pipefail
           unzip -q proyecto.zip -d src_proyecto
-          find src_proyecto -maxdepth 3 | head -60
+          find src_proyecto -maxdepth 3 | head -40
 
       - name: Copiar librerías nativas del APK que funciona
         run: |
           set -eo pipefail
-          echo "== Archivos en la raíz del repo =="
-          ls -la
-
           BASE=$(find . -type f -iname "*.apk" \
-                   -not -path "./src_proyecto/*" -not -path "./.git/*" \
-                   -not -name "app-release-signed.apk" | head -1)
+                   -not -path "./src_proyecto/*" -not -path "./.git/*" | head -1)
           if [ -z "$BASE" ]; then
-            echo "ERROR: no hay ningún .apk en el repo."
-            echo "Subí Conecta_HWID_1_24_67.apk desde GitHub (Add file > Upload files) y volvé a ejecutar."
-            echo "== Todos los archivos del repo (sin .git) =="
+            echo "ERROR: no hay ningún .apk en el repo. Subí Conecta_HWID_1_24_67.apk (Add file > Upload files)."
             find . -type f -not -path "./.git/*" -not -path "./src_proyecto/*" | head -50
             exit 1
           fi
           echo "APK base: $BASE"
-          ls -l "$BASE"
 
           MANIFEST=$(find src_proyecto -path "*src/main/AndroidManifest.xml" -not -path "*/build/*" | head -1)
-          if [ -z "$MANIFEST" ]; then
-            echo "ERROR: no se encontró src/main/AndroidManifest.xml en el proyecto."; exit 1
-          fi
+          [ -n "$MANIFEST" ] || { echo "ERROR: no se encontró AndroidManifest.xml"; exit 1; }
           MAIN=$(dirname "$MANIFEST")
-          echo "Módulo principal: $MAIN"
+          MODULE=$(dirname "$(dirname "$MAIN")")
 
           mkdir -p "$RUNNER_TEMP/basex"
-          unzip -q "$BASE" 'lib/*' -d "$RUNNER_TEMP/basex" || {
-            echo "ERROR: ese APK no contiene carpeta lib/ (no es el que funciona o está dañado)."; exit 1; }
+          unzip -q "$BASE" 'lib/*' -d "$RUNNER_TEMP/basex" \
+            || { echo "ERROR: ese APK no tiene carpeta lib/"; exit 1; }
           mkdir -p "$MAIN/jniLibs"
           cp -r "$RUNNER_TEMP/basex/lib/." "$MAIN/jniLibs/"
-
-          echo "== jniLibs del proyecto =="
+          echo "== jniLibs =="
           find "$MAIN/jniLibs" -type f | sort
 
-          echo "== Configuración nativa del proyecto (informativo) =="
-          grep -rnE "abiFilters|jniLibs|useLegacyPackaging|externalNativeBuild" \
-            --include=build.gradle --include=build.gradle.kts src_proyecto || echo "(sin configuración especial)"
+          # El túnel ya viene compilado: se quita el build nativo (su código no está en el zip)
+          perl -0pi -e 's/[ \t]*externalNativeBuild\s*\{\s*ndkBuild\s*\{[^}]*\}\s*\}[ \t]*\n?//s; s/[ \t]*ndkVersion\s+[^\n]*\n//' "$MODULE/build.gradle"
+          echo "== Restos de build nativo en build.gradle (debe quedar vacío) =="
+          grep -nE "externalNativeBuild|ndkBuild|ndkVersion" "$MODULE/build.gradle" || echo "(ninguno)"
 
-      - name: Buscar cómo actualiza la app (informativo)
-        run: |
-          grep -rnE "api\.github\.com|raw\.githubusercontent|releases/latest|version\.json" \
-            --include=*.java --include=*.kt --include=*.xml --include=*.json \
-            src_proyecto 2>/dev/null | grep -v "/build/" | head -15 || true
-          echo "== Versión =="
-          grep -rnE "versionCode|versionName" --include=build.gradle --include=build.gradle.kts src_proyecto | head || true
-
-      - name: Compilar APK sin firmar
+      - name: Compilar APK (debug con R8, como tu build original)
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
+          SERVER_PORTS: ${{ secrets.SERVER_PORTS }}
+          UDPGW_PORT: ${{ secrets.UDPGW_PORT }}
+          AI_PORT: ${{ secrets.AI_PORT }}
+          AI_TOKEN: ${{ secrets.AI_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          TLS: ${{ secrets.TLS }}
+          TLS_SNI: ${{ secrets.TLS_SNI }}
+          APP_SUFFIX: ${{ secrets.APP_SUFFIX }}
         run: |
           set -eo pipefail
           SETTINGS=$(find src_proyecto \( -name settings.gradle -o -name settings.gradle.kts \) | head -1)
-          if [ -z "$SETTINGS" ]; then
-            echo "ERROR: no hay settings.gradle en el zip."; exit 1
-          fi
+          [ -n "$SETTINGS" ] || { echo "ERROR: no hay settings.gradle"; exit 1; }
           DIR=$(dirname "$SETTINGS")
           echo "$DIR" > "$RUNNER_TEMP/projdir.txt"
           cd "$DIR"
           if [ -f ./gradlew ]; then
             chmod +x ./gradlew
-            ./gradlew assembleRelease
+            ./gradlew assembleDebug
           else
-            gradle assembleRelease
+            gradle assembleDebug
           fi
 
-      - name: Verificar que el APK nuevo trae los .so
+      - name: Verificar APK compilado
         run: |
           set -eo pipefail
           DIR=$(cat "$RUNNER_TEMP/projdir.txt")
-          NEW=$(find "$DIR" -path "*outputs/apk/release*" -name "*.apk" | head -1)
-          if [ -z "$NEW" ]; then
-            echo "ERROR: no se encontró ningún APK de release."; find "$DIR" -name "*.apk"; exit 1
-          fi
+          NEW=$(find "$DIR" -path "*outputs/apk/debug*" -name "*.apk" | head -1)
+          [ -n "$NEW" ] || { echo "ERROR: no se encontró el APK debug"; find "$DIR" -name "*.apk"; exit 1; }
           NEW=$(realpath "$NEW")
           echo "$NEW" > "$RUNNER_TEMP/newapk.txt"
-          echo "APK nuevo: $NEW"
-          echo "== .so en el APK nuevo =="
-          unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/new_so.txt"
-          if ! grep -q "libhev-socks5-tunnel.so" "$RUNNER_TEMP/new_so.txt"; then
-            echo "ERROR: el APK nuevo no trae libhev-socks5-tunnel.so"; exit 1
-          fi
+          echo "APK: $NEW"
+          echo "== .so =="
+          unzip -l "$NEW" | awk '{print $4}' | grep '\.so$' | sort | tee "$RUNNER_TEMP/so.txt"
+          grep -q "libhev-socks5-tunnel.so" "$RUNNER_TEMP/so.txt" \
+            || { echo "ERROR: el APK no trae libhev-socks5-tunnel.so"; exit 1; }
+          echo "== R8 respetó TProxyService? =="
+          FOUND=0
+          for d in $(unzip -l "$NEW" | awk '{print $4}' | grep -E '^classes.*\.dex$'); do
+            if unzip -p "$NEW" "$d" | strings | grep -q "TProxyStartService"; then FOUND=1; fi
+          done
+          [ "$FOUND" = 1 ] && echo "OK: TProxyStartService presente" \
+            || { echo "ERROR: R8 eliminó/renombró TProxyService"; exit 1; }
 
       - name: Preparar clave y certificado
         env:
@@ -130,10 +127,9 @@ jobs:
           fi
           rm -f key.raw
 
+          # Certificado sin openssl (rechaza el país vacío de tu certificado)
           sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$GITHUB_WORKSPACE/cert.pem" \
             | grep -v -- '-----' | tr -d ' \r\n\t' | base64 -d > cert.der
-
-          echo "== Certificado =="
           keytool -printcert -file cert.der | head -8
 
       - name: Alinear y firmar APK
@@ -150,10 +146,12 @@ jobs:
             --out app-release-signed.apk \
             "$RUNNER_TEMP/aligned.apk"
 
-          "$BT/apksigner" verify --verbose --print-certs app-release-signed.apk
+          "$BT/apksigner" verify --verbose --print-certs app-release-signed.apk | tee "$RUNNER_TEMP/verify.txt"
 
-          echo "== .so en el APK FINAL =="
-          unzip -l app-release-signed.apk | awk '{print $4}' | grep '\.so$' | sort
+          # La firma tiene que ser la tuya (SHA-256 de tu certificado original)
+          grep -qi "8250277addbb48d5db5424319beb1426c9601b510b0e3f9f9092d30e53cdca25" "$RUNNER_TEMP/verify.txt" \
+            || { echo "ERROR: la firma NO es la de tu certificado original"; exit 1; }
+          echo "OK: firma original (el_tioNel)"
 
       - name: Limpiar claves
         if: always()
@@ -165,20 +163,13 @@ jobs:
           name: apk-firmado
           path: app-release-signed.apk
 
-      - name: Publicar Release (solo si lo pedís a mano)
+      - name: Publicar Release (opcional)
         if: github.event_name == 'workflow_dispatch' && inputs.publicar
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eo pipefail
-          VN=$(grep -rhoE "versionName[[:space:]]*=?[[:space:]]*[\"'][^\"']+[\"']" \
-                 --include=build.gradle --include=build.gradle.kts src_proyecto \
-               | head -1 | sed -E "s/.*[\"']([^\"']+)[\"']/\1/")
-          if [ -n "$VN" ]; then TAG="v$VN"; else TAG="v$(date +%Y.%m.%d-%H%M)"; fi
-          echo "Tag del release: $TAG"
+          TAG="v1.24.${GITHUB_RUN_NUMBER}"
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
           gh release create "$TAG" app-release-signed.apk \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
-            --notes "Build automático" \
-            --latest
+            --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Build automático" --latest
