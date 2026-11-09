@@ -61,6 +61,7 @@ jobs:
           TLS: ${{ secrets.TLS }}
           TLS_SNI: ${{ secrets.TLS_SNI }}
           IPV6: ${{ secrets.IPV6 }}
+          DROP_QUIC: ${{ secrets.DROP_QUIC }}
           APP_SUFFIX: ${{ secrets.APP_SUFFIX }}
         run: |
           set -eo pipefail
