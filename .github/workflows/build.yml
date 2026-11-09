@@ -60,6 +60,7 @@ jobs:
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           TLS: ${{ secrets.TLS }}
           TLS_SNI: ${{ secrets.TLS_SNI }}
+          IPV6: ${{ secrets.IPV6 }}
           APP_SUFFIX: ${{ secrets.APP_SUFFIX }}
         run: |
           set -eo pipefail
