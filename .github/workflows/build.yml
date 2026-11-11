@@ -63,6 +63,8 @@ jobs:
           IPV6: ${{ secrets.IPV6 }}
           DROP_QUIC: ${{ secrets.DROP_QUIC }}
           APP_SUFFIX: ${{ secrets.APP_SUFFIX }}
+          SLOW_OK_KBPS: ${{ vars.SLOW_OK_KBPS }}
+          SLOW_INTERVAL_S: ${{ vars.SLOW_INTERVAL_S }}
         run: |
           set -eo pipefail
           SETTINGS=$(find src_proyecto \( -name settings.gradle -o -name settings.gradle.kts \) | head -1)
